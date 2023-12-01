@@ -1,6 +1,6 @@
 /*
-Plugin Name
-Copyright (C) <Year> <Developer> <Email Address>
+OBS SVT-AV1 Encoder Plugin
+Copyright (C) 2023 Kristian Ollikainen <Email Address>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

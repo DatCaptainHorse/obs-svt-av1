@@ -34,6 +34,16 @@ if(ENABLE_QT)
                AUTORCC ON)
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
+# SVT-AV1 (thru pkg-config)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SVT-AV1 REQUIRED IMPORTED_TARGET SvtAv1Enc)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE PkgConfig::SVT-AV1)
+# EOF SVT-AV1
+
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+  src/plugin-main.cpp
+  src/svt-av1-encoder.cpp
+  src/svt-av1-encoder.hpp
+)
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
