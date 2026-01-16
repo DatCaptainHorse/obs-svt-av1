@@ -1,44 +1,24 @@
-cmake_minimum_required(VERSION 3.16...3.26)
+cmake_minimum_required(VERSION 3.25)
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+project(obs-svt-av1 VERSION 0.0.1)
 
-project(${_name} VERSION ${_version})
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
-option(ENABLE_QT "Use Qt functionality" OFF)
+# Enable modern compiler warnings
+if(MSVC)
+  add_compile_options(/W4 /permissive-)
+else()
+  add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+endif()
 
-include(compilerconfig)
-include(defaults)
-include(helpers)
-
-add_library(${CMAKE_PROJECT_NAME} MODULE)
-
+# Dependencies
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+find_package(SvtAv1Enc REQUIRED)
 
-if(ENABLE_FRONTEND_API)
-  find_package(obs-frontend-api REQUIRED)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
-endif()
-
-if(ENABLE_QT)
-  find_qt(COMPONENTS Widgets Core)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt::Core Qt::Widgets)
-  target_compile_options(
-    ${CMAKE_PROJECT_NAME} PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header
-                                  -Wno-comma>)
-  set_target_properties(
-    ${CMAKE_PROJECT_NAME}
-    PROPERTIES AUTOMOC ON
-               AUTOUIC ON
-               AUTORCC ON)
-endif()
-
-# SVT-AV1 (thru pkg-config)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SVT-AV1 REQUIRED IMPORTED_TARGET SvtAv1Enc)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE PkgConfig::SVT-AV1)
-# EOF SVT-AV1
+# Plugin target
+add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/plugin-main.cpp
@@ -46,4 +26,27 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/svt-av1-encoder.hpp
 )
 
-set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+  OBS::libobs
+  SvtAv1::SvtAv1Enc
+)
+
+# Set output name (standard OBS plugin naming convention)
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+  OUTPUT_NAME "obs-svt-av1"
+  PREFIX ""
+)
+
+# Install location (standard OBS plugin structure)
+if(NOT DEFINED OBS_PLUGIN_DESTINATION)
+    if(WIN32)
+        set(OBS_PLUGIN_DESTINATION "obs-plugins/64bit")
+    else()
+        set(OBS_PLUGIN_DESTINATION "lib/obs-plugins")
+    endif()
+endif()
+
+install(TARGETS ${CMAKE_PROJECT_NAME}
+    LIBRARY DESTINATION ${OBS_PLUGIN_DESTINATION}
+    RUNTIME DESTINATION ${OBS_PLUGIN_DESTINATION}
+)

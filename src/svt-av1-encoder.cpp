@@ -1,306 +1,511 @@
-/*
-OBS SVT-AV1 Encoder Plugin
-Copyright (C) 2023 Kristian Ollikainen <Email Address>
-
-This program is free software; you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation; either version 2 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License along
-with this program. If not, see <https://www.gnu.org/licenses/>
-*/
-
 #include <plugin-support.h>
 #include <svt-av1-encoder.hpp>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <new>
 
-#include <initializer_list>
-
-static void log_svt_av1_config(const EbSvtAv1EncConfiguration &config)
-{
-	obs_log(LOG_INFO, "SVT-AV1 Encoder Configuration:");
-	obs_log(LOG_INFO, "  Encoder Mode: %d", config.enc_mode);
-	obs_log(LOG_INFO, "  Source Width: %d", config.source_width);
-	obs_log(LOG_INFO, "  Source Height: %d", config.source_height);
-	obs_log(LOG_INFO, "  Frame Rate: %d/%d", config.frame_rate_numerator,
-		config.frame_rate_denominator);
-	obs_log(LOG_INFO, "  Rate Control Mode: %d", config.rate_control_mode);
-	obs_log(LOG_INFO, "  Target Bit Rate: %d", config.target_bit_rate);
-	obs_log(LOG_INFO, "  Keyframe Interval: %d", config.intra_period_length);
-	obs_log(LOG_INFO, "  Scene Change Detection: %d",
-		config.scene_change_detection);
-	obs_log(LOG_INFO, "  Lookahead Distance: %d", config.look_ahead_distance);
-	obs_log(LOG_INFO, "  Enable Overlays: %d", config.enable_overlays);
-	obs_log(LOG_INFO, "  Tune: %d", config.tune);
-	obs_log(LOG_INFO, "  Fast Decode: %d", config.fast_decode);
-	obs_log(LOG_INFO, "  Logical Processors: %d", config.logical_processors);
-	obs_log(LOG_INFO, "  Encoder Color Format: %d",
-		config.encoder_color_format);
-	obs_log(LOG_INFO, "  Encoder Bit Depth: %d", config.encoder_bit_depth);
+// Helper to calculate buffer size for YUV420
+static size_t get_yuv420_buffer_size(int width, int height, int bit_depth) {
+    size_t size = width * height; // Y
+    size += (width / 2) * (height / 2) * 2; // U + V
+    if (bit_depth > 8) size *= 2; // 16-bit elements
+    return size;
 }
 
-void *svt_av1_encoder_create(obs_data_t *settings, obs_encoder_t *encoder)
-{
-	obs_log(LOG_INFO, "creating SVT-AV1 encoder");
+void SvtAv1Encoder::svt_log_callback(void* context, SvtAv1LogLevel level, const char* tag, const char* fmt, va_list args) {
+    UNUSED_PARAMETER(context);
+    UNUSED_PARAMETER(tag);
+    // Map SVT log levels to OBS
+    int obs_level = LOG_DEBUG;
+    switch (level) {
+        case SVT_AV1_LOG_FATAL: obs_level = LOG_ERROR; break;
+        case SVT_AV1_LOG_ERROR: obs_level = LOG_ERROR; break;
+        case SVT_AV1_LOG_WARN:  obs_level = LOG_WARNING; break;
+        case SVT_AV1_LOG_INFO:  obs_level = LOG_INFO; break;
+        case SVT_AV1_LOG_DEBUG: obs_level = LOG_DEBUG; break;
+        default: break;
+    }
 
-	auto *enc = static_cast<svt_av1_encoder *>(
-		bzalloc(sizeof(svt_av1_encoder)));
-	if (!enc) {
-		obs_log(LOG_ERROR, "failed to allocate SVT-AV1 encoder");
-		return nullptr;
-	}
-
-	enc->obs_encoder = encoder;
-
-	if (const auto res = svt_av1_enc_init_handle(&enc->svt_encoder, nullptr,
-						     &enc->svt_config);
-	    res != EB_ErrorNone) {
-		obs_log(LOG_ERROR, "failed to create SVT-AV1 encoder: %s", res);
-		bfree(enc);
-		return nullptr;
-	}
-
-	const auto video = obs_encoder_video(enc->obs_encoder);
-	const auto voi = video_output_get_info(video);
-
-	enc->svt_config.enc_mode = static_cast<int8_t>(obs_data_get_int(settings, "enc_preset"));
-	enc->svt_config.pred_structure = SVT_AV1_PRED_RANDOM_ACCESS;
-	enc->svt_config.source_width = voi->width;
-	enc->svt_config.source_height = voi->height;
-	enc->svt_config.frame_rate_numerator = voi->fps_num;
-	enc->svt_config.frame_rate_denominator = voi->fps_den;
-	enc->svt_config.color_range = voi->format == VIDEO_FORMAT_I420
-					      ? EB_CR_FULL_RANGE
-					      : EB_CR_STUDIO_RANGE;
-	enc->svt_config.rate_control_mode = SVT_AV1_RC_MODE_VBR;
-	enc->svt_config.target_bit_rate = static_cast<uint32_t>(obs_data_get_int(settings, "enc_bitrate") * 1000);
-	enc->svt_config.scene_change_detection = static_cast<uint32_t>(obs_data_get_int(settings, "enc_scd"));
-	enc->svt_config.look_ahead_distance = static_cast<uint32_t>(obs_data_get_int(settings, "enc_lookahead"));
-	enc->svt_config.enable_overlays = static_cast<unsigned char>(obs_data_get_int(settings, "enc_overlays"));
-	enc->svt_config.tune = static_cast<uint8_t>(obs_data_get_int(settings, "enc_tune"));
-	enc->svt_config.fast_decode = static_cast<unsigned char>(obs_data_get_int(settings, "enc_fast_decode"));
-	enc->svt_config.logical_processors = static_cast<uint32_t>(obs_data_get_int(settings, "enc_threads"));
-	enc->svt_config.intra_period_length = static_cast<int32_t>(obs_data_get_int(settings, "enc_keyint"));
-
-	enc->format = voi->format;
-	switch (enc->format) {
-	case VIDEO_FORMAT_I010:
-	case VIDEO_FORMAT_P010:
-		enc->svt_config.encoder_color_format = EB_YUV420;
-		enc->svt_config.encoder_bit_depth = 10;
-		enc->plane_count = 2;
-		break;
-	case VIDEO_FORMAT_I420:
-		enc->svt_config.encoder_color_format = EB_YUV420;
-		enc->svt_config.encoder_bit_depth = 8;
-		enc->plane_count = 3;
-		break;
-	case VIDEO_FORMAT_NV12:
-		// Allocate enc->i420_frame (uint8_t*[3]) memory
-		enc->i420_frame[0] = static_cast<uint8_t *>(
-			bzalloc(voi->width * voi->height));
-		enc->i420_frame[1] = static_cast<uint8_t *>(
-			bzalloc(voi->width * voi->height / 4));
-		enc->i420_frame[2] = static_cast<uint8_t *>(
-			bzalloc(voi->width * voi->height / 4));
-	default:
-		enc->svt_config.encoder_color_format = EB_YUV420;
-		enc->svt_config.encoder_bit_depth = 8;
-		enc->plane_count = 2;
-		break;
-	}
-
-	if (const auto res = svt_av1_enc_set_parameter(enc->svt_encoder,
-						       &enc->svt_config);
-	    res != EB_ErrorNone) {
-		obs_log(LOG_ERROR,
-			"failed to set SVT-AV1 encoder parameters: %s", res);
-		svt_av1_enc_deinit_handle(enc->svt_encoder);
-		bfree(enc);
-		return nullptr;
-	}
-
-	log_svt_av1_config(enc->svt_config);
-
-	if (const auto res = svt_av1_enc_init(enc->svt_encoder);
-	    res != EB_ErrorNone) {
-		obs_log(LOG_ERROR, "failed to initialize SVT-AV1 encoder: %s",
-			res);
-		svt_av1_enc_deinit_handle(enc->svt_encoder);
-		bfree(enc);
-		return nullptr;
-	}
-
-	enc->buffer = static_cast<EbBufferHeaderType *>(
-		bzalloc(sizeof(EbBufferHeaderType)));
-	enc->buffer->size = sizeof(EbBufferHeaderType);
-
-	enc->buffer->p_buffer =
-		static_cast<uint8_t *>(bzalloc(sizeof(EbSvtIOFormat)));
-
-	enc->perf_token = os_request_high_performance("svt-av1 encoding");
-
-	return enc;
+    // We can't easily use obs_log with va_list safely across all platforms/versions here without a wrapper,
+    // but typically we can format into a buffer.
+    char buffer[4096];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    obs_log(obs_level, "[SVT-AV1] %s", buffer);
 }
 
-void svt_av1_encoder_destroy(void *data)
-{
-	auto *enc = static_cast<svt_av1_encoder *>(data);
-	if (!enc)
-		return;
+SvtAv1Encoder::SvtAv1Encoder(obs_data_t* settings, obs_encoder_t* encoder)
+    : obs_encoder_(encoder) {
 
-	EbErrorType res = EB_ErrorNone;
+    // Set log callback globally (SVT API is global for this)
+    // Note: This might conflict if multiple instances set different contexts,
+    // but the callback here is static and context-free mainly.
+    svt_av1_set_log_callback(svt_log_callback, nullptr);
 
-	// Send EOS frame
-	EbBufferHeaderType eos_buf;
-	eos_buf.n_alloc_len = 0;
-	eos_buf.n_filled_len = 0;
-	eos_buf.n_tick_count = 0;
-	eos_buf.p_app_private = nullptr;
-	eos_buf.flags = EB_BUFFERFLAG_EOS;
-	eos_buf.p_buffer = nullptr;
-	eos_buf.metadata = nullptr;
+    // Initialize config
+    svt_config_.enc_mode = 8; // Default
 
-	res = svt_av1_enc_send_picture(enc->svt_encoder, &eos_buf);
-	if (res != EB_ErrorNone) {
-		obs_log(LOG_ERROR,
-			"failed to send EOS frame to SVT-AV1 encoder: %s", res);
-	}
+    if (init_svt()) {
+       update_settings(settings);
 
-	// Drain
-	EbBufferHeaderType *output_buf = nullptr;
-	res = svt_av1_enc_get_packet(enc->svt_encoder, &output_buf, true);
-	if (res != EB_ErrorNone) {
-		obs_log(LOG_ERROR, "failed to drain SVT-AV1 encoder: %s", res);
-	}
+       // Apply settings
+       if (svt_av1_enc_set_parameter(svt_handle_, &svt_config_) != EB_ErrorNone) {
+           obs_log(LOG_ERROR, "Failed to set SVT-AV1 parameters");
+       }
 
-	os_end_high_performance(enc->perf_token);
-	svt_av1_enc_deinit(enc->svt_encoder);
-	svt_av1_enc_deinit_handle(enc->svt_encoder);
-	bfree(enc->buffer->p_buffer);
-	bfree(enc->buffer);
-	bfree(enc);
+       // Init encoder
+       if (svt_av1_enc_init(svt_handle_) != EB_ErrorNone) {
+           obs_log(LOG_ERROR, "Failed to initialize SVT-AV1 encoder");
+       }
+
+       // Create input buffer
+       input_buffer_header_ = (EbBufferHeaderType*)bzalloc(sizeof(EbBufferHeaderType));
+       input_buffer_header_->size = sizeof(EbBufferHeaderType);
+
+       // Allocate the wrapper struct for planar pointers
+       input_buffer_data_.resize(sizeof(EbSvtIOFormat));
+       input_buffer_header_->p_buffer = input_buffer_data_.data();
+
+       // Internal planar buffer allocation will happen on first frame or if size known
+       video_t *video = obs_encoder_video(encoder);
+       const struct video_output_info *voi = video_output_get_info(video);
+
+       width_ = voi->width;
+       height_ = voi->height;
+       format_ = voi->format;
+
+       // Check for 10-bit override
+       bool force_10bit = obs_data_get_bool(settings, "enc_10bit");
+       bit_depth_ = (format_ == VIDEO_FORMAT_P010 || format_ == VIDEO_FORMAT_I010 || force_10bit) ? 10 : 8;
+
+       // If we are doing conversion, allocate buffer
+       if (format_ == VIDEO_FORMAT_NV12 || format_ == VIDEO_FORMAT_P010) {
+           size_t buf_size = get_yuv420_buffer_size(width_, height_, bit_depth_);
+           planar_buffer_.resize(buf_size);
+       }
+
+       perf_token_ = os_request_high_performance("svt-av1 encoding");
+    }
 }
 
-// Convert NV12 to I420 (i420_frame*[3] variable)
-// returns true if conversion was successful
-static void convert_nv12_to_i420(svt_av1_encoder *enc, encoder_frame *frame,
-				 uint32_t frame_width, uint32_t frame_height)
-{
-	// Get size of Y plane
-	const int y_size = frame_width * frame_height;
-
-	// Copy the Y plane data from input frame to output frame
-	memcpy(enc->i420_frame[0], frame->data[0], y_size);
-
-	// Set pointer to start of input UV plane data
-	uint8_t *uv_plane = frame->data[1];
-
-	for (uint32_t h = 0; h < frame_height / 2; ++h) {
-		for (uint32_t w = 0; w < frame_width; w += 2) {
-			enc->i420_frame[1][w / 2 + h * (frame_width / 2)] =
-				uv_plane[w]; // U plane
-			enc->i420_frame[2][w / 2 + h * (frame_width / 2)] =
-				uv_plane[w + 1]; // V plane
-		}
-		uv_plane += frame_width;
-	}
+SvtAv1Encoder::~SvtAv1Encoder() {
+    if (svt_handle_) {
+        svt_av1_enc_deinit(svt_handle_);
+        svt_av1_enc_deinit_handle(svt_handle_);
+    }
+    if (input_buffer_header_) {
+        bfree(input_buffer_header_);
+    }
+    if (perf_token_) {
+        os_end_high_performance(perf_token_);
+    }
 }
 
-static void handle_packet(svt_av1_encoder *enc, encoder_packet *packet,
-			  bool done_sending_pics, bool *received_packet)
-{
-	EbBufferHeaderType *packet_buffer;
-	if (const EbErrorType error = svt_av1_enc_get_packet(
-		    enc->svt_encoder, &packet_buffer, done_sending_pics);
-	    error != EB_ErrorNone) {
-		if (error != EB_NoErrorEmptyQueue) {
-			obs_log(LOG_ERROR, "Failed to get encoded packet: %d",
-				error);
-		}
-		*received_packet = false;
-		return;
-	}
-
-	// Allocate memory
-	packet->data =
-		static_cast<uint8_t *>(bzalloc(packet_buffer->n_filled_len));
-	// Copy the encoded data
-	memcpy(packet->data, packet_buffer->p_buffer,
-	       packet_buffer->n_filled_len);
-
-	packet->size = packet_buffer->n_filled_len;
-	packet->type = OBS_ENCODER_VIDEO;
-	packet->pts = packet_buffer->pts;
-	packet->dts = packet_buffer->dts;
-	packet->keyframe = packet_buffer->pic_type == EB_AV1_KEY_PICTURE;
-
-	svt_av1_enc_release_out_buffer(&packet_buffer);
-
-	*received_packet = true;
+bool SvtAv1Encoder::init_svt() {
+    return svt_av1_enc_init_handle(&svt_handle_, &svt_config_) == EB_ErrorNone;
 }
 
-bool svt_av1_encoder_encode(void *data, encoder_frame *frame,
-			    encoder_packet *packet, bool *received_packet)
-{
-	auto *enc = static_cast<svt_av1_encoder *>(data);
+void SvtAv1Encoder::update_settings(obs_data_t* settings) {
+    video_t *video = obs_encoder_video(obs_encoder_);
+    const struct video_output_info *voi = video_output_get_info(video);
 
-	if (!packet || !received_packet || !enc)
-		return false;
+    // Basic Video Info
+    svt_config_.source_width = voi->width;
+    svt_config_.source_height = voi->height;
+    svt_config_.frame_rate_numerator = voi->fps_num;
+    svt_config_.frame_rate_denominator = voi->fps_den;
+    svt_config_.encoder_bit_depth = bit_depth_;
+    svt_config_.encoder_color_format = EB_YUV420; // We convert everything to 420
 
-	const auto video = obs_encoder_video(enc->obs_encoder);
-	const auto voi = video_output_get_info(video);
+    // Preset
+    svt_config_.enc_mode = (int8_t)obs_data_get_int(settings, "enc_preset");
 
-	enc->buffer->flags = 0;
-	enc->buffer->p_app_private = nullptr;
-	enc->buffer->pic_type = EB_AV1_INVALID_PICTURE;
-	enc->buffer->metadata = nullptr;
+    // Rate Control
+    const char* rc = obs_data_get_string(settings, "rc_mode");
+    if (strcmp(rc, "CQP") == 0) {
+        svt_config_.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
+        // For CQP in SVT, we often set Min/Max QP to same or use qp
+        uint32_t qp = (uint32_t)obs_data_get_int(settings, "enc_qp");
+        svt_config_.qp = qp;
+        // Disable adaptive quantization for pure CQP if desired, or let SVT handle it
+        // svt_config_.enable_adaptive_quantization = 0;
+    } else if (strcmp(rc, "CRF") == 0) {
+        svt_config_.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
+        uint32_t crf = (uint32_t)obs_data_get_int(settings, "enc_crf");
+        // SVT maps QP field to CRF when in this mode if AQ is set correctly?
+        // Actually SVT v3 has a specific CRF logic usually via qp field or separate.
+        // Looking at Parameters.md: "CRF ... setting this value is similar to --rc 0 --aq-mode 2 --qp x"
+        svt_config_.qp = crf;
+        svt_config_.max_bit_rate = (uint32_t)(obs_data_get_int(settings, "enc_max_bitrate") * 1000);
+    } else if (strcmp(rc, "VBR") == 0) {
+        svt_config_.rate_control_mode = SVT_AV1_RC_MODE_VBR;
+        svt_config_.target_bit_rate = (uint32_t)(obs_data_get_int(settings, "enc_bitrate") * 1000);
+    } else if (strcmp(rc, "CBR") == 0) {
+        svt_config_.rate_control_mode = SVT_AV1_RC_MODE_CBR;
+        svt_config_.target_bit_rate = (uint32_t)(obs_data_get_int(settings, "enc_bitrate") * 1000);
+    }
 
-	if (frame) {
-		auto *p_buffer = reinterpret_cast<EbSvtIOFormat *>(
-			enc->buffer->p_buffer);
+    // GOP
+    int keyint = (int)obs_data_get_int(settings, "enc_keyint");
+    svt_config_.intra_period_length = (keyint == -1) ? -2 : keyint; // -2 is auto in SVT
 
-		// If NV12, convert to I420
-		if (enc->format == VIDEO_FORMAT_NV12) {
-			convert_nv12_to_i420(enc, frame, voi->width,
-					     voi->height);
-			// If conversion is successful, the Y, U, and V planes of the frame are updated in enc->i420_frame
-			p_buffer->luma = enc->i420_frame[0]; // Y plane
-			p_buffer->cb = enc->i420_frame[1];   // U plane
-			p_buffer->cr = enc->i420_frame[2];   // V plane
+    // Profile/Tier
+    svt_config_.profile = (EbAv1SeqProfile)obs_data_get_int(settings, "enc_profile");
+    svt_config_.tier = (uint32_t)obs_data_get_int(settings, "enc_tier");
 
-			p_buffer->y_stride = voi->width;                                   // Y stride
-			p_buffer->cb_stride = p_buffer->cr_stride = voi->width / 2;        // U, V strides
+    // Lookahead
+    svt_config_.look_ahead_distance = (uint32_t)obs_data_get_int(settings, "enc_lookahead");
 
-			p_buffer->color_fmt = EB_YUV420;            // Define color format as YUV420
-		} else {
-			// For other formats, use the original data (assuming it is already in I420 or related format)
-			p_buffer->luma = frame->data[0]; // Y plane
-			p_buffer->cb = frame->data[1];   // U plane
-			p_buffer->cr = frame->data[2];   // V plane
-		}
+    // SCD
+    svt_config_.scene_change_detection = (uint32_t)obs_data_get_int(settings, "enc_scd");
 
-		// Frame size as n_filled_len
-		enc->buffer->n_filled_len =
-			voi->height * voi->width *
-			static_cast<uint32_t>(enc->plane_count * 3 / 2);
-		enc->buffer->pts = frame->pts;
-	}
+    // Tune
+    svt_config_.tune = (uint8_t)obs_data_get_int(settings, "enc_tune");
 
-	if (const auto res =
-		    svt_av1_enc_send_picture(enc->svt_encoder, enc->buffer);
-	    res != EB_ErrorNone) {
-		obs_log(LOG_ERROR,
-			"failed to send picture to SVT-AV1 encoder: %s", res);
-		return false;
-	}
+    // Threads
+    svt_config_.level_of_parallelism = (uint32_t)obs_data_get_int(settings, "enc_threads");
 
-	handle_packet(enc, packet, frame == nullptr, received_packet);
+    // Tiles
+    svt_config_.tile_columns = (int32_t)obs_data_get_int(settings, "tile_cols");
+    svt_config_.tile_rows = (int32_t)obs_data_get_int(settings, "tile_rows");
 
-	return true;
+    // Film Grain
+    svt_config_.film_grain_denoise_strength = (uint32_t)obs_data_get_int(settings, "film_grain");
+    if (svt_config_.film_grain_denoise_strength > 0) {
+        svt_config_.film_grain_denoise_apply = 1;
+    }
+
+    // Color / HDR
+    int primaries = (int)obs_data_get_int(settings, "color_primaries");
+    int transfer = (int)obs_data_get_int(settings, "color_trc");
+    int matrix = (int)obs_data_get_int(settings, "color_matrix");
+    int range = (int)obs_data_get_int(settings, "color_range");
+
+    if (primaries != 2) svt_config_.color_primaries = (EbColorPrimaries)primaries;
+    if (transfer != 2) svt_config_.transfer_characteristics = (EbTransferCharacteristics)transfer;
+    if (matrix != 2) svt_config_.matrix_coefficients = (EbMatrixCoefficients)matrix;
+    svt_config_.color_range = (EbColorRange)range;
+
+    // 10-bit forcing validation
+    if (bit_depth_ == 10) {
+        svt_config_.encoder_bit_depth = 10;
+    }
+}
+
+// ... helper conversion functions implemented previously ...
+
+void SvtAv1Encoder::convert_nv12_to_i420(const uint8_t* luma, int luma_stride,
+                                        const uint8_t* chroma, int chroma_stride,
+                                        uint8_t* y, uint8_t* u, uint8_t* v,
+                                        int width, int height) {
+    // Copy Y plane
+    for (int r = 0; r < height; ++r) {
+        memcpy(y + r * width, luma + r * luma_stride, width);
+    }
+
+    // De-interleave UV plane
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+
+    for (int r = 0; r < uv_height; ++r) {
+        const uint8_t* src_row = chroma + r * chroma_stride;
+        uint8_t* u_row = u + r * uv_width;
+        uint8_t* v_row = v + r * uv_width;
+
+        for (int c = 0; c < uv_width; ++c) {
+            u_row[c] = src_row[2 * c];
+            v_row[c] = src_row[2 * c + 1];
+        }
+    }
+}
+
+void SvtAv1Encoder::convert_p010_to_i010(const uint8_t* luma, int luma_stride,
+                                        const uint8_t* chroma, int chroma_stride,
+                                        uint16_t* y, uint16_t* u, uint16_t* v,
+                                        int width, int height) {
+    // Y Plane
+    for (int r = 0; r < height; ++r) {
+        const uint16_t* src_row = reinterpret_cast<const uint16_t*>(luma + r * luma_stride);
+        uint16_t* dst_row = y + r * width;
+        for (int c = 0; c < width; ++c) {
+            dst_row[c] = src_row[c] >> 6;
+        }
+    }
+
+    // UV Plane
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+
+    for (int r = 0; r < uv_height; ++r) {
+        const uint16_t* src_row = reinterpret_cast<const uint16_t*>(chroma + r * chroma_stride);
+        uint16_t* u_row = u + r * uv_width;
+        uint16_t* v_row = v + r * uv_width;
+
+        for (int c = 0; c < uv_width; ++c) {
+            u_row[c] = src_row[2 * c] >> 6;
+            v_row[c] = src_row[2 * c + 1] >> 6;
+        }
+    }
+}
+
+void SvtAv1Encoder::convert_nv12_to_i010(const uint8_t* luma, int luma_stride,
+                                        const uint8_t* chroma, int chroma_stride,
+                                        uint16_t* y, uint16_t* u, uint16_t* v,
+                                        int width, int height) {
+    // Y Plane (8-bit -> 10-bit)
+    for (int r = 0; r < height; ++r) {
+        const uint8_t* src_row = luma + r * luma_stride;
+        uint16_t* dst_row = y + r * width;
+        for (int c = 0; c < width; ++c) {
+            // Shift 8 bits to 10 bits (<< 2)
+            dst_row[c] = (uint16_t)src_row[c] << 2;
+        }
+    }
+
+    // UV Plane (8-bit -> 10-bit)
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+
+    for (int r = 0; r < uv_height; ++r) {
+        const uint8_t* src_row = chroma + r * chroma_stride;
+        uint16_t* u_row = u + r * uv_width;
+        uint16_t* v_row = v + r * uv_width;
+
+        for (int c = 0; c < uv_width; ++c) {
+            u_row[c] = (uint16_t)src_row[2 * c] << 2;
+            v_row[c] = (uint16_t)src_row[2 * c + 1] << 2;
+        }
+    }
+}
+
+void SvtAv1Encoder::convert_i420_to_i010(const uint8_t* luma, int luma_stride,
+                                        const uint8_t* cb, int cb_stride,
+                                        const uint8_t* cr, int cr_stride,
+                                        uint16_t* y, uint16_t* u, uint16_t* v,
+                                        int width, int height) {
+    // Y Plane
+    for (int r = 0; r < height; ++r) {
+        const uint8_t* src_row = luma + r * luma_stride;
+        uint16_t* dst_row = y + r * width;
+        for (int c = 0; c < width; ++c) {
+            dst_row[c] = (uint16_t)src_row[c] << 2;
+        }
+    }
+
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+
+    // U Plane
+    for (int r = 0; r < uv_height; ++r) {
+        const uint8_t* src_row = cb + r * cb_stride;
+        uint16_t* dst_row = u + r * uv_width;
+        for (int c = 0; c < uv_width; ++c) {
+            dst_row[c] = (uint16_t)src_row[c] << 2;
+        }
+    }
+
+    // V Plane
+    for (int r = 0; r < uv_height; ++r) {
+        const uint8_t* src_row = cr + r * cr_stride;
+        uint16_t* dst_row = v + r * uv_width;
+        for (int c = 0; c < uv_width; ++c) {
+            dst_row[c] = (uint16_t)src_row[c] << 2;
+        }
+    }
+}
+
+bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
+    if (format_ == VIDEO_FORMAT_NV12) {
+        if (bit_depth_ == 10) {
+            // Force 8-bit NV12 to 10-bit I010
+            size_t y_size = width_ * height_;
+            size_t uv_size = (width_ / 2) * (height_ / 2);
+
+            uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
+            uint16_t* u = y + y_size;
+            uint16_t* v = u + uv_size;
+
+            convert_nv12_to_i010(frame->data[0], frame->linesize[0],
+                                 frame->data[1], frame->linesize[1],
+                                 y, u, v, width_, height_);
+
+            buffer->luma = reinterpret_cast<uint8_t*>(y);
+            buffer->cb = reinterpret_cast<uint8_t*>(u);
+            buffer->cr = reinterpret_cast<uint8_t*>(v);
+            buffer->y_stride = width_ * 2; // 16-bit
+            buffer->cb_stride = (width_ / 2) * 2;
+            buffer->cr_stride = (width_ / 2) * 2;
+        } else {
+            // Standard NV12 to I420
+            size_t y_size = width_ * height_;
+            size_t uv_size = (width_ / 2) * (height_ / 2);
+
+            uint8_t* y = planar_buffer_.data();
+            uint8_t* u = y + y_size;
+            uint8_t* v = u + uv_size;
+
+            convert_nv12_to_i420(frame->data[0], frame->linesize[0],
+                                 frame->data[1], frame->linesize[1],
+                                 y, u, v, width_, height_);
+
+            buffer->luma = y;
+            buffer->cb = u;
+            buffer->cr = v;
+            buffer->y_stride = width_;
+            buffer->cb_stride = width_ / 2;
+            buffer->cr_stride = width_ / 2;
+        }
+    } else if (format_ == VIDEO_FORMAT_P010) {
+        size_t y_size = width_ * height_;
+        size_t uv_size = (width_ / 2) * (height_ / 2);
+
+        uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
+        uint16_t* u = y + y_size;
+        uint16_t* v = u + uv_size;
+
+        convert_p010_to_i010(frame->data[0], frame->linesize[0],
+                             frame->data[1], frame->linesize[1],
+                             y, u, v, width_, height_);
+
+        buffer->luma = reinterpret_cast<uint8_t*>(y);
+        buffer->cb = reinterpret_cast<uint8_t*>(u);
+        buffer->cr = reinterpret_cast<uint8_t*>(v);
+        buffer->y_stride = width_ * 2;
+        buffer->cb_stride = (width_ / 2) * 2;
+        buffer->cr_stride = (width_ / 2) * 2;
+
+    } else if (format_ == VIDEO_FORMAT_I420) {
+        if (bit_depth_ == 10) {
+            // Force 8-bit I420 to 10-bit I010
+            size_t y_size = width_ * height_;
+            size_t uv_size = (width_ / 2) * (height_ / 2);
+
+            uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
+            uint16_t* u = y + y_size;
+            uint16_t* v = u + uv_size;
+
+            convert_i420_to_i010(frame->data[0], frame->linesize[0],
+                                 frame->data[1], frame->linesize[1],
+                                 frame->data[2], frame->linesize[2],
+                                 y, u, v, width_, height_);
+
+            buffer->luma = reinterpret_cast<uint8_t*>(y);
+            buffer->cb = reinterpret_cast<uint8_t*>(u);
+            buffer->cr = reinterpret_cast<uint8_t*>(v);
+            buffer->y_stride = width_ * 2;
+            buffer->cb_stride = (width_ / 2) * 2;
+            buffer->cr_stride = (width_ / 2) * 2;
+        } else {
+            // Pass-through
+            buffer->luma = frame->data[0];
+            buffer->cb = frame->data[1];
+            buffer->cr = frame->data[2];
+            buffer->y_stride = frame->linesize[0];
+            buffer->cb_stride = frame->linesize[1];
+            buffer->cr_stride = frame->linesize[2];
+        }
+    } else if (format_ == VIDEO_FORMAT_I010) {
+        buffer->luma = frame->data[0];
+        buffer->cb = frame->data[1];
+        buffer->cr = frame->data[2];
+        buffer->y_stride = frame->linesize[0];
+        buffer->cb_stride = frame->linesize[1];
+        buffer->cr_stride = frame->linesize[2];
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool SvtAv1Encoder::encode(encoder_frame* frame, encoder_packet* packet, bool* received_packet) {
+    if (!packet || !received_packet) return false;
+
+    // Reset packet received state
+    *received_packet = false;
+
+    // Send Frame
+    EbBufferHeaderType* input_buffer = input_buffer_header_;
+    input_buffer->n_filled_len = 0; // Default to 0 if no frame (flush)
+    input_buffer->flags = 0;
+    input_buffer->p_app_private = nullptr;
+    input_buffer->pic_type = EB_AV1_INVALID_PICTURE;
+    input_buffer->metadata = nullptr;
+
+    if (frame) {
+        EbSvtIOFormat* buffer_fmt = (EbSvtIOFormat*)input_buffer->p_buffer;
+        buffer_fmt->color_fmt = EB_YUV420; // All our inputs are converted to/are 420
+
+        if (!convert_frame(frame, buffer_fmt)) {
+            obs_log(LOG_ERROR, "Unsupported video format conversion");
+            return false;
+        }
+
+        // n_filled_len isn't strictly used for planar input in same way as packed,
+        // but typically size of YUV planes. SVT ignores it for pointers but good to set.
+        input_buffer->n_filled_len = (uint32_t)(width_ * height_ * (bit_depth_ == 10 ? 2 : 1) * 3 / 2);
+        input_buffer->pts = frame->pts;
+    } else {
+        input_buffer->flags = EB_BUFFERFLAG_EOS;
+    }
+
+    EbErrorType res = svt_av1_enc_send_picture(svt_handle_, input_buffer);
+    if (res != EB_ErrorNone) {
+        obs_log(LOG_ERROR, "svt_av1_enc_send_picture failed: %d", res);
+        return false;
+    }
+
+    // Get Packet
+    EbBufferHeaderType* output_buffer = nullptr;
+    bool done = (frame == nullptr);
+    res = svt_av1_enc_get_packet(svt_handle_, &output_buffer, done);
+
+    if (res == EB_ErrorNone && output_buffer) {
+        if (output_buffer->flags & EB_BUFFERFLAG_EOS) {
+             // End of stream
+        } else {
+            *received_packet = true;
+
+            // Resize persistent buffer and copy data
+            // OBS packet data pointer is valid until the next call to encode/destroy
+            packet_data_.resize(output_buffer->n_filled_len);
+            memcpy(packet_data_.data(), output_buffer->p_buffer, output_buffer->n_filled_len);
+
+            packet->data = packet_data_.data();
+            packet->size = output_buffer->n_filled_len;
+            packet->type = OBS_ENCODER_VIDEO;
+            packet->pts = output_buffer->pts;
+            packet->dts = output_buffer->dts;
+            packet->keyframe = (output_buffer->pic_type == EB_AV1_KEY_PICTURE || output_buffer->pic_type == EB_AV1_FW_KEY_PICTURE);
+
+            svt_av1_enc_release_out_buffer(&output_buffer);
+        }
+    } else if (res != EB_NoErrorEmptyQueue) {
+         // Log error if not just empty queue
+         // obs_log(LOG_WARNING, "svt_av1_enc_get_packet returned %d", res);
+    }
+
+    return true;
+}
+
+// Static Wrappers
+void* SvtAv1Encoder::create(obs_data_t* settings, obs_encoder_t* encoder) {
+    try {
+        auto* enc = new SvtAv1Encoder(settings, encoder);
+        if (!enc->is_valid()) {
+            delete enc;
+            return nullptr;
+        }
+        return enc;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void SvtAv1Encoder::destroy(void* data) {
+    delete static_cast<SvtAv1Encoder*>(data);
+}
+
+bool SvtAv1Encoder::encode_wrapper(void* data, encoder_frame* frame, encoder_packet* packet, bool* received_packet) {
+    return static_cast<SvtAv1Encoder*>(data)->encode(frame, packet, received_packet);
 }
