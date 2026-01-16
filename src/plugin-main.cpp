@@ -31,7 +31,13 @@ static const char *svt_av1_encoder_getname(void *)
 
 static void svt_av1_encoder_get_video_info(void *, struct video_scale_info *info)
 {
-	info->format = VIDEO_FORMAT_NV12; // Preferred
+	// Passthrough supported formats to avoid unnecessary conversion
+	if (info->format == VIDEO_FORMAT_P010 || info->format == VIDEO_FORMAT_I010 ||
+	    info->format == VIDEO_FORMAT_NV12 || info->format == VIDEO_FORMAT_I420) {
+		return;
+	}
+	// Default preference
+	info->format = VIDEO_FORMAT_NV12;
 }
 
 static void svt_av1_encoder_get_defaults(obs_data_t *settings)

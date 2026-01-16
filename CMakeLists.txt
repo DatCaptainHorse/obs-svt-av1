@@ -15,7 +15,10 @@ endif()
 
 # Dependencies
 find_package(libobs REQUIRED)
-find_package(SvtAv1Enc REQUIRED)
+
+# SVT-AV1 (via PkgConfig)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SVT_AV1 REQUIRED IMPORTED_TARGET SvtAv1Enc)
 
 # Plugin target
 add_library(${CMAKE_PROJECT_NAME} MODULE)
@@ -28,7 +31,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
   OBS::libobs
-  SvtAv1::SvtAv1Enc
+  PkgConfig::SVT_AV1
 )
 
 # Set output name (standard OBS plugin naming convention)

@@ -1,5 +1,5 @@
 #include <plugin-support.h>
-#include <svt-av1-encoder.hpp>
+#include "svt-av1-encoder.hpp"
 #include <vector>
 #include <algorithm>
 #include <cmath>
