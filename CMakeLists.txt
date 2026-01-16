@@ -20,6 +20,13 @@ find_package(libobs REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SVT_AV1 REQUIRED IMPORTED_TARGET SvtAv1Enc)
 
+# Configure plugin-support.c
+configure_file(
+  src/plugin-support.c.in
+  ${CMAKE_BINARY_DIR}/src/plugin-support.c
+  @ONLY
+)
+
 # Plugin target
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
@@ -27,6 +34,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/plugin-main.cpp
   src/svt-av1-encoder.cpp
   src/svt-av1-encoder.hpp
+  ${CMAKE_BINARY_DIR}/src/plugin-support.c
+)
+
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_BINARY_DIR}/src
 )
 
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
