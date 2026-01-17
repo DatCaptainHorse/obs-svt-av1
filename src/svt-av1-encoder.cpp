@@ -1,4 +1,4 @@
-#include "plugin-support.h"
+#include <plugin-support.h>
 #include "svt-av1-encoder.hpp"
 #include <vector>
 #include <algorithm>
@@ -8,40 +8,14 @@
 
 // Helper to calculate buffer size for YUV420
 static size_t get_yuv420_buffer_size(int width, int height, int bit_depth) {
-    size_t size = width * height; // Y
-    size += (width / 2) * (height / 2) * 2; // U + V
+    size_t size = (size_t)width * (size_t)height; // Y
+    size += ((size_t)width / 2) * ((size_t)height / 2) * 2; // U + V
     if (bit_depth > 8) size *= 2; // 16-bit elements
     return size;
 }
 
-void SvtAv1Encoder::svt_log_callback(void* context, SvtAv1LogLevel level, const char* tag, const char* fmt, va_list args) {
-    UNUSED_PARAMETER(context);
-    UNUSED_PARAMETER(tag);
-    // Map SVT log levels to OBS
-    int obs_level = LOG_DEBUG;
-    switch (level) {
-        case SVT_AV1_LOG_FATAL: obs_level = LOG_ERROR; break;
-        case SVT_AV1_LOG_ERROR: obs_level = LOG_ERROR; break;
-        case SVT_AV1_LOG_WARN:  obs_level = LOG_WARNING; break;
-        case SVT_AV1_LOG_INFO:  obs_level = LOG_INFO; break;
-        case SVT_AV1_LOG_DEBUG: obs_level = LOG_DEBUG; break;
-        default: break;
-    }
-
-    // We can't easily use obs_log with va_list safely across all platforms/versions here without a wrapper,
-    // but typically we can format into a buffer.
-    char buffer[4096];
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
-    obs_log(obs_level, "[SVT-AV1] %s", buffer);
-}
-
 SvtAv1Encoder::SvtAv1Encoder(obs_data_t* settings, obs_encoder_t* encoder)
     : obs_encoder_(encoder) {
-
-    // Set log callback globally (SVT API is global for this)
-    // Note: This might conflict if multiple instances set different contexts,
-    // but the callback here is static and context-free mainly.
-    svt_av1_set_log_callback(svt_log_callback, nullptr);
 
     // Initialize config
     svt_config_.enc_mode = 8; // Default
@@ -71,8 +45,8 @@ SvtAv1Encoder::SvtAv1Encoder(obs_data_t* settings, obs_encoder_t* encoder)
        video_t *video = obs_encoder_video(encoder);
        const struct video_output_info *voi = video_output_get_info(video);
 
-       width_ = voi->width;
-       height_ = voi->height;
+       width_ = (int)voi->width;
+       height_ = (int)voi->height;
        format_ = voi->format;
 
        // Check for 10-bit override
@@ -115,7 +89,7 @@ void SvtAv1Encoder::update_settings(obs_data_t* settings) {
     svt_config_.source_height = voi->height;
     svt_config_.frame_rate_numerator = voi->fps_num;
     svt_config_.frame_rate_denominator = voi->fps_den;
-    svt_config_.encoder_bit_depth = bit_depth_;
+    svt_config_.encoder_bit_depth = (uint32_t)bit_depth_;
     svt_config_.encoder_color_format = EB_YUV420; // We convert everything to 420
 
     // Preset
@@ -201,7 +175,7 @@ void SvtAv1Encoder::convert_nv12_to_i420(const uint8_t* luma, int luma_stride,
                                         int width, int height) {
     // Copy Y plane
     for (int r = 0; r < height; ++r) {
-        memcpy(y + r * width, luma + r * luma_stride, width);
+        memcpy(y + r * width, luma + r * luma_stride, (size_t)width);
     }
 
     // De-interleave UV plane
@@ -319,8 +293,8 @@ bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
     if (format_ == VIDEO_FORMAT_NV12) {
         if (bit_depth_ == 10) {
             // Force 8-bit NV12 to 10-bit I010
-            size_t y_size = width_ * height_;
-            size_t uv_size = (width_ / 2) * (height_ / 2);
+            size_t y_size = (size_t)width_ * (size_t)height_;
+            size_t uv_size = ((size_t)width_ / 2) * ((size_t)height_ / 2);
 
             uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
             uint16_t* u = y + y_size;
@@ -333,13 +307,13 @@ bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
             buffer->luma = reinterpret_cast<uint8_t*>(y);
             buffer->cb = reinterpret_cast<uint8_t*>(u);
             buffer->cr = reinterpret_cast<uint8_t*>(v);
-            buffer->y_stride = width_ * 2; // 16-bit
-            buffer->cb_stride = (width_ / 2) * 2;
-            buffer->cr_stride = (width_ / 2) * 2;
+            buffer->y_stride = (uint32_t)(width_ * 2); // 16-bit
+            buffer->cb_stride = (uint32_t)((width_ / 2) * 2);
+            buffer->cr_stride = (uint32_t)((width_ / 2) * 2);
         } else {
             // Standard NV12 to I420
-            size_t y_size = width_ * height_;
-            size_t uv_size = (width_ / 2) * (height_ / 2);
+            size_t y_size = (size_t)width_ * (size_t)height_;
+            size_t uv_size = ((size_t)width_ / 2) * ((size_t)height_ / 2);
 
             uint8_t* y = planar_buffer_.data();
             uint8_t* u = y + y_size;
@@ -352,13 +326,13 @@ bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
             buffer->luma = y;
             buffer->cb = u;
             buffer->cr = v;
-            buffer->y_stride = width_;
-            buffer->cb_stride = width_ / 2;
-            buffer->cr_stride = width_ / 2;
+            buffer->y_stride = (uint32_t)width_;
+            buffer->cb_stride = (uint32_t)(width_ / 2);
+            buffer->cr_stride = (uint32_t)(width_ / 2);
         }
     } else if (format_ == VIDEO_FORMAT_P010) {
-        size_t y_size = width_ * height_;
-        size_t uv_size = (width_ / 2) * (height_ / 2);
+        size_t y_size = (size_t)width_ * (size_t)height_;
+        size_t uv_size = ((size_t)width_ / 2) * ((size_t)height_ / 2);
 
         uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
         uint16_t* u = y + y_size;
@@ -371,15 +345,15 @@ bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
         buffer->luma = reinterpret_cast<uint8_t*>(y);
         buffer->cb = reinterpret_cast<uint8_t*>(u);
         buffer->cr = reinterpret_cast<uint8_t*>(v);
-        buffer->y_stride = width_ * 2;
-        buffer->cb_stride = (width_ / 2) * 2;
-        buffer->cr_stride = (width_ / 2) * 2;
+        buffer->y_stride = (uint32_t)(width_ * 2);
+        buffer->cb_stride = (uint32_t)((width_ / 2) * 2);
+        buffer->cr_stride = (uint32_t)((width_ / 2) * 2);
 
     } else if (format_ == VIDEO_FORMAT_I420) {
         if (bit_depth_ == 10) {
             // Force 8-bit I420 to 10-bit I010
-            size_t y_size = width_ * height_;
-            size_t uv_size = (width_ / 2) * (height_ / 2);
+            size_t y_size = (size_t)width_ * (size_t)height_;
+            size_t uv_size = ((size_t)width_ / 2) * ((size_t)height_ / 2);
 
             uint16_t* y = reinterpret_cast<uint16_t*>(planar_buffer_.data());
             uint16_t* u = y + y_size;
@@ -393,25 +367,25 @@ bool SvtAv1Encoder::convert_frame(encoder_frame* frame, EbSvtIOFormat* buffer) {
             buffer->luma = reinterpret_cast<uint8_t*>(y);
             buffer->cb = reinterpret_cast<uint8_t*>(u);
             buffer->cr = reinterpret_cast<uint8_t*>(v);
-            buffer->y_stride = width_ * 2;
-            buffer->cb_stride = (width_ / 2) * 2;
-            buffer->cr_stride = (width_ / 2) * 2;
+            buffer->y_stride = (uint32_t)(width_ * 2);
+            buffer->cb_stride = (uint32_t)((width_ / 2) * 2);
+            buffer->cr_stride = (uint32_t)((width_ / 2) * 2);
         } else {
             // Pass-through
             buffer->luma = frame->data[0];
             buffer->cb = frame->data[1];
             buffer->cr = frame->data[2];
-            buffer->y_stride = frame->linesize[0];
-            buffer->cb_stride = frame->linesize[1];
-            buffer->cr_stride = frame->linesize[2];
+            buffer->y_stride = (uint32_t)frame->linesize[0];
+            buffer->cb_stride = (uint32_t)frame->linesize[1];
+            buffer->cr_stride = (uint32_t)frame->linesize[2];
         }
     } else if (format_ == VIDEO_FORMAT_I010) {
         buffer->luma = frame->data[0];
         buffer->cb = frame->data[1];
         buffer->cr = frame->data[2];
-        buffer->y_stride = frame->linesize[0];
-        buffer->cb_stride = frame->linesize[1];
-        buffer->cr_stride = frame->linesize[2];
+        buffer->y_stride = (uint32_t)frame->linesize[0];
+        buffer->cb_stride = (uint32_t)frame->linesize[1];
+        buffer->cr_stride = (uint32_t)frame->linesize[2];
     } else {
         return false;
     }
@@ -434,7 +408,7 @@ bool SvtAv1Encoder::encode(encoder_frame* frame, encoder_packet* packet, bool* r
 
     if (frame) {
         EbSvtIOFormat* buffer_fmt = (EbSvtIOFormat*)input_buffer->p_buffer;
-        buffer_fmt->color_fmt = EB_YUV420; // All our inputs are converted to/are 420
+        // buffer_fmt->color_fmt = EB_YUV420; // Removed as it does not exist in some versions
 
         if (!convert_frame(frame, buffer_fmt)) {
             obs_log(LOG_ERROR, "Unsupported video format conversion");

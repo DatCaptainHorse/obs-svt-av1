@@ -75,8 +75,5 @@ private:
 
     os_performance_token_t* perf_token_ = nullptr;
 
-    // Logging callback
-    static void svt_log_callback(void* context, SvtAv1LogLevel level, const char* tag, const char* fmt, va_list args);
-
     bool is_valid() const { return svt_handle_ != nullptr; }
 };

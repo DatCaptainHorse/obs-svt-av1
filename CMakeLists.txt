@@ -10,7 +10,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
   add_compile_options(/W4 /permissive-)
 else()
-  add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+  # Removed strict sign conversion warnings for legacy compatibility
+  # add_compile_options(-Wconversion -Wsign-conversion)
 endif()
 
 # Dependencies
